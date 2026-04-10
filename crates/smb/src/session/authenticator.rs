@@ -77,10 +77,14 @@ impl Authenticator {
     }
 
     fn get_context_requirements() -> ClientRequestFlags {
-        ClientRequestFlags::DELEGATE
-            | ClientRequestFlags::MUTUAL_AUTH
+        // Match the flags used by the Windows SMB2 client (MS-SMB2 3.2.4.2.3).
+        // DELEGATE is intentionally excluded: it is Kerberos-specific and can cause
+        // certain SSPI implementations to produce invalid NTLM tokens when Kerberos
+        // is not actually in use.
+        ClientRequestFlags::MUTUAL_AUTH
             | ClientRequestFlags::INTEGRITY
-            | ClientRequestFlags::FRAGMENT_TO_FIT
+            | ClientRequestFlags::REPLAY_DETECT
+            | ClientRequestFlags::SEQUENCE_DETECT
             | ClientRequestFlags::USE_SESSION_KEY
     }
 
@@ -110,9 +114,10 @@ impl Authenticator {
             .with_target_data_representation(Self::SSPI_REQ_DATA_REPRESENTATION)
             .with_output(&mut output_buffer);
 
-        if cfg!(feature = "kerberos") {
-            builder = builder.with_target_name(&target_name)
-        }
+        // The target name (SPN) must always be provided, regardless of authentication
+        // method. NTLM's Negotiate SSP uses it as the TargetName field, and omitting it
+        // causes sspi-rs to return NoCredentials even for pure-NTLM sessions.
+        builder = builder.with_target_name(&target_name);
 
         let mut input_buffers = vec![];
         input_buffers.push(SecurityBuffer::new(gss_token.to_owned(), BufferType::Token));
