@@ -145,6 +145,74 @@ pub fn wrap_response(ntlm_token: &[u8]) -> Vec<u8> {
     der_tlv(0xa1, &neg_token_resp) // [1] CHOICE
 }
 
+/// Extract the mechToken from a SPNEGO `NegTokenInit` (APPLICATION[0]).
+///
+/// This is used to strip sspi-rs's own SPNEGO wrapper so we can re-wrap
+/// with a clean, minimal NegTokenInit containing only the NTLMSSP OID.
+///
+/// Returns the raw mechanism token (NTLM Type-1), or an error if the
+/// structure cannot be parsed.
+pub fn unwrap_init(gss_token: &[u8]) -> crate::Result<Vec<u8>> {
+    if gss_token.is_empty() || gss_token[0] != 0x60 {
+        return Err(Error::InvalidMessage(
+            format!(
+                "SPNEGO: expected APPLICATION[0] (0x60), got 0x{:02x}",
+                gss_token.first().copied().unwrap_or(0)
+            ),
+        ));
+    }
+
+    // Skip APPLICATION[0] header.
+    let (app_hdr, _) = der_skip_header(gss_token)?;
+    let inner = &gss_token[app_hdr..];
+
+    // Skip the SPNEGO OID (should be 06 06 2b 06 01 05 05 02).
+    if inner.len() < SPNEGO_OID.len() || &inner[..SPNEGO_OID.len()] != SPNEGO_OID {
+        return Err(Error::InvalidMessage("SPNEGO: missing SPNEGO OID in NegTokenInit".into()));
+    }
+    let after_oid = &inner[SPNEGO_OID.len()..];
+
+    // Skip [0] NegotiationToken wrapper.
+    if after_oid.is_empty() || after_oid[0] != 0xa0 {
+        return Err(Error::InvalidMessage("SPNEGO: expected [0] in NegTokenInit".into()));
+    }
+    let (ctx0_hdr, _) = der_skip_header(after_oid)?;
+    let neg_token = &after_oid[ctx0_hdr..];
+
+    // Skip SEQUENCE (NegTokenInit body).
+    if neg_token.is_empty() || neg_token[0] != 0x30 {
+        return Err(Error::InvalidMessage("SPNEGO: expected SEQUENCE in NegTokenInit".into()));
+    }
+    let (seq_hdr, seq_len) = der_skip_header(neg_token)?;
+    let seq_body = &neg_token[seq_hdr..];
+    let seq_end = seq_len.min(seq_body.len());
+    let mut pos = 0;
+
+    while pos < seq_end {
+        let tag = seq_body[pos];
+        let (elem_hdr, elem_len) = der_skip_header(&seq_body[pos..])?;
+
+        if tag == 0xa2 {
+            // [2] mechToken — extract the OCTET STRING inside.
+            let elem_body = &seq_body[pos + elem_hdr..];
+            if elem_body.is_empty() || elem_body[0] != 0x04 {
+                return Err(Error::InvalidMessage(
+                    "SPNEGO: expected OCTET STRING inside mechToken".into(),
+                ));
+            }
+            let (octet_hdr, octet_len) = der_skip_header(elem_body)?;
+            let end = octet_hdr + octet_len.min(elem_body.len() - octet_hdr);
+            return Ok(elem_body[octet_hdr..end].to_vec());
+        }
+
+        pos += elem_hdr + elem_len;
+    }
+
+    Err(Error::InvalidMessage(
+        "SPNEGO: mechToken ([2]) not found in NegTokenInit".into(),
+    ))
+}
+
 /// Extract the inner NTLM token from a server's SPNEGO `NegTokenResp`.
 ///
 /// The server sends:

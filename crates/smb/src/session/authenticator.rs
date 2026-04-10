@@ -172,34 +172,55 @@ impl Authenticator {
             .ok_or_else(|| Error::InvalidState("SSPI output buffer is empty.".to_string()))?
             .buffer;
 
-        // Wrap the raw NTLM token in SPNEGO so that Windows SMB2 servers
-        // accept it (MS-SMB2 §3.2.4.2.3 mandates GSSAPI/SPNEGO blobs).
-        if super::spnego::is_raw_ntlm(&raw_token) {
-            if !self.first_token_sent {
-                self.first_token_sent = true;
-                let wrapped = super::spnego::wrap_init(&raw_token);
-                log::debug!(
-                    "SPNEGO: wrapped NTLM Type-1 ({} bytes) -> NegTokenInit ({} bytes)",
-                    raw_token.len(),
-                    wrapped.len()
-                );
-                Ok(wrapped)
-            } else {
-                let wrapped = super::spnego::wrap_response(&raw_token);
-                log::debug!(
-                    "SPNEGO: wrapped NTLM ({} bytes) -> NegTokenResp ({} bytes)",
-                    raw_token.len(),
-                    wrapped.len()
-                );
-                Ok(wrapped)
+        // Ensure the outgoing token uses our own minimal SPNEGO wrapper
+        // with only the NTLMSSP OID.  sspi-rs's Negotiate SSP may produce
+        // a SPNEGO NegTokenInit that includes Kerberos OIDs in the
+        // mechTypes list, which can confuse certain Windows servers.
+        let ntlm_bytes = if super::spnego::is_raw_ntlm(&raw_token) {
+            raw_token
+        } else if raw_token.first() == Some(&0x60) {
+            // Strip sspi-rs's own SPNEGO wrapper to get the raw NTLM.
+            match super::spnego::unwrap_init(&raw_token) {
+                Ok(inner) => {
+                    log::debug!(
+                        "SPNEGO: stripped sspi-rs wrapper ({} bytes -> {} bytes raw NTLM)",
+                        raw_token.len(),
+                        inner.len()
+                    );
+                    inner
+                }
+                Err(e) => {
+                    log::warn!("SPNEGO: failed to unwrap sspi-rs token, passing through: {e}");
+                    return Ok(raw_token);
+                }
             }
         } else {
+            // Unknown format; pass through.
             log::debug!(
-                "SPNEGO: token already wrapped ({} bytes, tag=0x{:02x})",
+                "SPNEGO: unknown token format ({} bytes, tag=0x{:02x}), passing through",
                 raw_token.len(),
                 raw_token.first().copied().unwrap_or(0)
             );
-            Ok(raw_token)
+            return Ok(raw_token);
+        };
+
+        if !self.first_token_sent {
+            self.first_token_sent = true;
+            let wrapped = super::spnego::wrap_init(&ntlm_bytes);
+            log::debug!(
+                "SPNEGO: NTLM Type-1 ({} bytes) -> NegTokenInit ({} bytes, NTLMSSP-only)",
+                ntlm_bytes.len(),
+                wrapped.len()
+            );
+            Ok(wrapped)
+        } else {
+            let wrapped = super::spnego::wrap_response(&ntlm_bytes);
+            log::debug!(
+                "SPNEGO: NTLM ({} bytes) -> NegTokenResp ({} bytes)",
+                ntlm_bytes.len(),
+                wrapped.len()
+            );
+            Ok(wrapped)
         }
     }
 
