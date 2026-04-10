@@ -177,12 +177,28 @@ impl Authenticator {
         if super::spnego::is_raw_ntlm(&raw_token) {
             if !self.first_token_sent {
                 self.first_token_sent = true;
-                Ok(super::spnego::wrap_init(&raw_token))
+                let wrapped = super::spnego::wrap_init(&raw_token);
+                log::debug!(
+                    "SPNEGO: wrapped NTLM Type-1 ({} bytes) -> NegTokenInit ({} bytes)",
+                    raw_token.len(),
+                    wrapped.len()
+                );
+                Ok(wrapped)
             } else {
-                Ok(super::spnego::wrap_response(&raw_token))
+                let wrapped = super::spnego::wrap_response(&raw_token);
+                log::debug!(
+                    "SPNEGO: wrapped NTLM ({} bytes) -> NegTokenResp ({} bytes)",
+                    raw_token.len(),
+                    wrapped.len()
+                );
+                Ok(wrapped)
             }
         } else {
-            // Token is already SPNEGO (e.g. Kerberos path); pass through.
+            log::debug!(
+                "SPNEGO: token already wrapped ({} bytes, tag=0x{:02x})",
+                raw_token.len(),
+                raw_token.first().copied().unwrap_or(0)
+            );
             Ok(raw_token)
         }
     }
