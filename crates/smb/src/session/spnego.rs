@@ -145,6 +145,87 @@ pub fn wrap_response(ntlm_token: &[u8]) -> Vec<u8> {
     der_tlv(0xa1, &neg_token_resp) // [1] CHOICE
 }
 
+/// Wrap an NTLM Type-3 (AUTHENTICATE_MESSAGE) in a SPNEGO `NegTokenResp`
+/// with a mechListMIC.
+///
+/// Per MS-SPNG §3.1.5.1, when the negotiated mechanism's security context
+/// is complete, the initiator MUST include the mechListMIC.
+///
+/// ```text
+/// [1] {
+///   SEQUENCE {
+///     [2] OCTET STRING { <Type-3> }   -- responseToken
+///     [3] OCTET STRING { <MIC> }      -- mechListMIC
+///   }
+/// }
+/// ```
+pub fn wrap_response_with_mic(ntlm_token: &[u8], mic: &[u8]) -> Vec<u8> {
+    let response_token = der_tlv(0x04, ntlm_token); // OCTET STRING
+    let response_token_ctx = der_tlv(0xa2, &response_token); // [2]
+    let mic_octet = der_tlv(0x04, mic); // OCTET STRING
+    let mic_ctx = der_tlv(0xa3, &mic_octet); // [3] mechListMIC
+    let mut seq = response_token_ctx;
+    seq.extend(mic_ctx);
+    let neg_token_resp = der_tlv(0x30, &seq); // SEQUENCE
+    der_tlv(0xa1, &neg_token_resp) // [1] CHOICE
+}
+
+/// The DER-encoded mechTypeList from the NegTokenInit (only NTLMSSP OID).
+///
+/// Per MS-SPNG §3.1.5.1, the mechListMIC is computed over the `mechTypes`
+/// field of the initial NegTokenInit.  This is the raw `MechTypeList`
+/// (SEQUENCE OF MechType) WITHOUT the context tag [0].
+///
+/// ```text
+/// SEQUENCE {
+///   OID 1.3.6.1.4.1.311.2.2.10   -- NTLMSSP
+/// }
+/// ```
+pub const MECH_TYPE_LIST_BYTES: &[u8] = &[
+    0x30, 0x0C, // SEQUENCE of 12 bytes
+    0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0A,
+];
+
+/// Same as MECH_TYPE_LIST_BYTES but with the context [0] tag wrapper.
+/// Some implementations compute the MIC over the tagged field.
+#[allow(dead_code)]
+pub const MECH_TYPE_LIST_BYTES_TAGGED: &[u8] = &[
+    0xa0, 0x0E, // [0] context tag, length 14
+    0x30, 0x0C, // SEQUENCE of 12 bytes
+    0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0A,
+];
+
+/// Build a minimal SPNEGO NegTokenResp with negState = accept-completed (0).
+///
+/// Used as the final client acknowledgment when the server sends
+/// STATUS_MORE_PROCESSING_REQUIRED with a mechListMIC after the NTLM
+/// exchange is complete.  Per RFC 4178 §5, when the preferred mechanism
+/// is the common mechanism and optimistic token was used, the response
+/// need not include a mechListMIC.
+pub fn make_accept_complete() -> Vec<u8> {
+    let neg_state = der_tlv(0x0a, &[0x00]); // ENUMERATED: accept-completed
+    let neg_state_ctx = der_tlv(0xa0, &neg_state); // [0]
+    let neg_token_resp = der_tlv(0x30, &neg_state_ctx); // SEQUENCE
+    der_tlv(0xa1, &neg_token_resp) // [1] CHOICE
+}
+
+/// Build a SPNEGO NegTokenResp with negState = accept-completed (0) and
+/// a mechListMIC computed by the caller.
+///
+/// Used as the final client acknowledgment when the server sends
+/// STATUS_MORE_PROCESSING_REQUIRED with its own mechListMIC.
+#[allow(dead_code)]
+pub fn make_accept_complete_with_mic(mic: &[u8]) -> Vec<u8> {
+    let neg_state = der_tlv(0x0a, &[0x00]); // ENUMERATED: accept-completed
+    let neg_state_ctx = der_tlv(0xa0, &neg_state); // [0]
+    let mic_octet = der_tlv(0x04, mic); // OCTET STRING
+    let mic_ctx = der_tlv(0xa3, &mic_octet); // [3] mechListMIC
+    let mut seq = neg_state_ctx;
+    seq.extend(mic_ctx);
+    let neg_token_resp = der_tlv(0x30, &seq); // SEQUENCE
+    der_tlv(0xa1, &neg_token_resp) // [1] CHOICE
+}
+
 /// Extract the mechToken from a SPNEGO `NegTokenInit` (APPLICATION[0]).
 ///
 /// This is used to strip sspi-rs's own SPNEGO wrapper so we can re-wrap
