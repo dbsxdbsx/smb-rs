@@ -1,4 +1,5 @@
 use crate::session::authenticator::Authenticator;
+use sspi::UsernameParts;
 
 use super::*;
 
@@ -92,10 +93,18 @@ where
     /// This function sets up a session against a connection, and it is somewhat abstract.
     /// by calling impl functions, this function's behavior is modified to support both new sessions and binding to existing sessions.
     pub(crate) async fn setup(&mut self) -> crate::Result<Arc<RwLock<SessionAndChannel>>> {
+        // `Username::domain_name()` is deprecated because it returns a UPN suffix
+        // and a NetBIOS domain through the same `&str`; match on the format-tagged
+        // view instead. SMB down-level logon (`DOMAIN\user`) is the only form that
+        // carries a NetBIOS domain.
+        let domain = match self.authenticator.user_name().parts() {
+            UsernameParts::DownLevelLogonName(parts) => parts.netbios_domain().unwrap_or(""),
+            UsernameParts::UserPrincipalName(parts) => parts.suffix(),
+        };
         log::debug!(
             "Setting up session for user {} (@{}).",
             self.authenticator.user_name().account_name(),
-            self.authenticator.user_name().domain_name().unwrap_or("")
+            domain
         );
 
         let result = self._setup_loop().await;
