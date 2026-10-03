@@ -1367,15 +1367,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kbkdf"
-version = "0.1.0-rc.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90ac93c9768b8d587407881c98b0c3a5d3e3049daa73408ebe5bfb1ab1cb9c84"
-dependencies = [
- "digest 0.11.3",
-]
-
-[[package]]
 name = "keccak"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2648,7 +2639,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hmac",
- "kbkdf",
  "log",
  "lz4_flex",
  "maybe-async",

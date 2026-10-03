@@ -175,6 +175,8 @@ impl Resource {
             access,
             share_type,
             conn_info: conn_info.clone(),
+            #[cfg(feature = "async")]
+            runtime: tokio::runtime::Handle::try_current().ok(),
         };
 
         // Construct specific resource and return it.
@@ -270,6 +272,14 @@ pub struct ResourceHandle {
     access: FileAccessMask,
 
     conn_info: Arc<ConnectionInfo>,
+
+    /// Captured where the handle is created, which is inside the Tokio runtime.
+    ///
+    /// `Drop` often runs on a GStreamer or worker thread that has no reactor.
+    /// `tokio::spawn` panics there (`there is no reactor running`). `Handle::spawn`
+    /// only needs this handle, so close can be scheduled from any thread.
+    #[cfg(feature = "async")]
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 #[maybe_async(AFIT)]
@@ -925,13 +935,81 @@ impl Drop for ResourceHandle {
 
         let file_id = self._file_id;
         let handler = self.handler.clone();
-        log::debug!("Spawning task to close file with ID: {file_id:?}");
-        tokio::task::spawn(async move {
+        let name = self.name.clone();
+        let spawned = spawn_close(self.runtime.take(), async move {
+            log::debug!("Spawning task to close file with ID: {file_id:?}");
             if file_id != FileId::EMPTY
                 && let Err(e) = Self::send_close(file_id, &handler).await
             {
                 log::error!("Error closing file: {e}");
             }
         });
+        if !spawned {
+            log::warn!(
+                "ResourceHandle for '{name}' ({file_id:?}) was dropped outside a Tokio runtime; the file was not closed"
+            );
+        }
+    }
+}
+
+/// Schedule `task` on a captured runtime handle.
+///
+/// Returns whether a runtime was available. Never calls `tokio::spawn`, which
+/// panics when the current thread has no reactor.
+#[cfg(feature = "async")]
+fn spawn_close(
+    runtime: Option<tokio::runtime::Handle>,
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) -> bool {
+    let Some(runtime) = runtime.or_else(|| tokio::runtime::Handle::try_current().ok()) else {
+        return false;
+    };
+    runtime.spawn(task);
+    true
+}
+
+#[cfg(all(test, feature = "async"))]
+mod off_runtime_close_tests {
+    use super::spawn_close;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn spawn_close_from_a_thread_without_a_reactor_does_not_panic() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (tx, rx) = mpsc::channel();
+        let handle = runtime.handle().clone();
+        runtime.block_on(async move {
+            let thread = std::thread::spawn(move || {
+                assert!(spawn_close(Some(handle), async move {
+                    let _ = tx.send(());
+                }));
+            });
+            let started = Instant::now();
+            loop {
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "close task did not run"
+                );
+                tokio::task::yield_now().await;
+            }
+            thread.join().expect("off-runtime thread panicked");
+        });
+    }
+
+    #[test]
+    fn spawn_close_without_any_runtime_does_not_panic() {
+        let thread = std::thread::spawn(|| {
+            assert!(!spawn_close(None, async {}));
+        });
+        thread
+            .join()
+            .expect("dropping off a runtime must not panic");
     }
 }

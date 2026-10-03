@@ -47,14 +47,12 @@ reqwest = { workspace = true, optional = true }
 
 # Crypto. The RustCrypto 0.2 generation (digest 0.11 / cipher 0.5 /
 # crypto-common 0.2) reached stable between 2026-02 and 2026-07, so these are
-# plain caret requirements now. `kbkdf` and `ccm` are the two holdouts with no
-# stable release yet.
+# plain caret requirements now. `ccm` is still pre-release. SMB 3 key
+# derivation does not use the `kbkdf` crate: its r=32 guard panics on
+# 32-bit `usize` (see `crypto/kbkdf.rs`).
 hmac = "0.13"
 sha2 = "0.11"
 md-5 = "0.11"
-# 0.1.0-pre.0 still imports the `digest::crypto_common` re-export that digest
-# 0.11 stable dropped; rc.1 is the first release that builds against it.
-kbkdf = { version = "0.1.0-rc.1" }
 crypto-common = { version = "0.2" }
 aes = "0.9"
 aes-gcm = { version = "0.11", optional = true }
