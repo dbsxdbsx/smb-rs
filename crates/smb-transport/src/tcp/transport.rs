@@ -118,11 +118,10 @@ impl TcpTransport {
     }
 
     /// Maps a TCP error to a crate error.
-    /// Connection aborts and unexpected EOFs are mapped to [Error::NotConnected].
+    /// Errors meaning the peer is gone are mapped to [Error::NotConnected], see [`Self::is_connection_lost`].
     #[inline]
     fn map_tcp_error(e: io::Error) -> TransportError {
-        if e.kind() == io::ErrorKind::ConnectionAborted || e.kind() == io::ErrorKind::UnexpectedEof
-        {
+        if Self::is_connection_lost(e.kind()) {
             log::error!("Got IO error: {e} -- Connection Error, notify NotConnected!");
             return TransportError::NotConnected;
         }
@@ -132,6 +131,22 @@ impl TcpTransport {
             log::error!("Got IO error: {e} -- Mapping to IO error.",);
         }
         e.into()
+    }
+
+    /// Whether an IO error kind means the connection is gone for good.
+    ///
+    /// A reset (RST: `os error 10054` on Windows, `ECONNRESET` elsewhere) or a broken pipe
+    /// fails every later read/write immediately. Treating it as a plain IO error made the
+    /// receive loop retry the dead socket in a tight loop, logging two errors per spin.
+    fn is_connection_lost(kind: io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::NotConnected
+                | io::ErrorKind::UnexpectedEof
+        )
     }
 
     #[maybe_async]
@@ -240,5 +255,55 @@ impl SmbTransportRead for TcpTransport {
             .ok_or(TransportError::NotConnected)?
             .set_read_timeout(Some(timeout))
             .map_err(|e| e.into())
+    }
+}
+
+#[cfg(test)]
+mod connection_lost_tests {
+    use super::TcpTransport;
+    use crate::error::TransportError;
+    use std::io;
+
+    #[test]
+    fn peer_gone_errors_map_to_not_connected() {
+        for kind in [
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                matches!(
+                    TcpTransport::map_tcp_error(io::Error::from(kind)),
+                    TransportError::NotConnected
+                ),
+                "{kind:?} should end the connection"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_reset_10054_maps_to_not_connected() {
+        // WSAECONNRESET: what a server RST looks like on Windows.
+        #[cfg(windows)]
+        let raw = 10054;
+        // ECONNRESET on Linux / Android.
+        #[cfg(not(windows))]
+        let raw = 104;
+        let e = io::Error::from_raw_os_error(raw);
+        assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
+        assert!(matches!(
+            TcpTransport::map_tcp_error(e),
+            TransportError::NotConnected
+        ));
+    }
+
+    #[test]
+    fn other_io_errors_stay_io_errors() {
+        assert!(matches!(
+            TcpTransport::map_tcp_error(io::Error::from(io::ErrorKind::PermissionDenied)),
+            TransportError::IoError(_)
+        ));
     }
 }

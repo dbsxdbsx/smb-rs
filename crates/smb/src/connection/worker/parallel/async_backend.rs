@@ -39,6 +39,13 @@ impl AsyncBackend {
                 Err(Error::ConnectionStopped) => {
                     break;
                 }
+                // Any other transport IO failure on the read half is not recoverable either:
+                // the next read hits the same dead socket at once. Stop instead of spinning.
+                Err(Error::TransportError(TransportError::IoError(e))) => {
+                    log::error!("Transport failed in worker loop, stopping: {e}");
+                    self_ref.token.cancel();
+                    break;
+                }
                 Err(e) => {
                     log::error!("Error in worker loop: {e}");
                 }
@@ -74,6 +81,11 @@ impl AsyncBackend {
                     break;
                 }
                 Err(Error::ConnectionStopped) => {
+                    break;
+                }
+                Err(Error::TransportError(TransportError::IoError(e))) => {
+                    log::error!("Transport failed in worker loop, stopping: {e}");
+                    self_ref.token.cancel();
                     break;
                 }
                 Err(e) => {
